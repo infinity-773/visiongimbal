@@ -20,6 +20,7 @@
 /*---------可自行添加：算法需要的头文件----------*/
 #include <string>
 #include <vector>
+#include <cstdint>
 /*---------添加区域结束----------*/
 
 
@@ -193,6 +194,11 @@ static double kAimV = height * 0.5;   // （需调参）
 // 丢几帧还算有目标
 static int    kHoldFrames = 8;
 
+// 连续丢失目标多久后回到固定角度
+static int    kReturnDelayMs = 500;
+static double kReturnYawAngle = 0.0;
+static double kReturnPitchAngle = 20.0;
+
 // 像素转角度
 static double kFocalPx = 700.0;   // （需调参）
 static double kYawSign = 1.0;       // 图像往右 yaw 变大填 1 变小填 -1（需调参）
@@ -205,19 +211,9 @@ static double kMaxStep = 6.0;       // 没反馈时一帧最多转多少度
 // 开火
 static double kAimTolPx = 12.0;         // 差多少像素算对准（需调参）
 static int    kAimFrames = 4;           // 连着几帧对上才打（需调参）
-static int    kShotIntervalMs = 800;    // 两发之间隔多久（需调参）
-static int    kMaxShots = 10;           // 一场就 10 发
 
 // 跨帧要记住的
-static BladeTarget g_lastTarget;
-static cv::Point2f g_filtered;                // 滤波后的点
-static bool g_hasFilter = false;
-static int  g_lostFrames = 100000;
-static int  g_aimedFrames = 0;
-static int  g_shotsFired = 0;
 static int  g_frameIndex = 0;
-static std::chrono::steady_clock::time_point g_lastShotAt =
-    std::chrono::steady_clock::now() - std::chrono::seconds(10);   // 开机就能打
 
 /*---------全局变量编写区域结束----------*/
 
@@ -309,6 +305,196 @@ static double pixelToAngle(double pixels, double focalPx)
 {
     return std::atan(pixels / focalPx) * 180.0 / CV_PI;
 }
+
+struct GimbalControlState
+{
+    BladeTarget target;
+    double du = 0.0;
+    double dv = 0.0;
+    double yawError = 0.0;
+    double pitchError = 0.0;
+    bool tracking = false;
+    bool returning = false;
+};
+
+class GimbalTargetController
+{
+public:
+    cv::Point2f referencePoint() const
+    {
+        if (hasFilter_)
+            return filtered_;
+        return cv::Point2f(static_cast<float>(kAimU), static_cast<float>(kAimV));
+    }
+
+    GimbalControlState update(const BladeTarget& detectedTarget,
+                              const TRoMaC::GimbalFeedback& feedback,
+                              bool feedbackValid,
+                              TRoMaC::VisionData& command,
+                              std::chrono::steady_clock::time_point now){
+
+        GimbalControlState state;
+        updateTargetFilter(detectedTarget, now);
+
+        const bool returnTimeout =
+            noTargetTimerStarted_ &&
+            now - noTargetSince_ >= std::chrono::milliseconds(kReturnDelayMs);
+        state.tracking = hasFilter_ && lostFrames_ <= kHoldFrames && !returnTimeout;
+
+        if (state.tracking)
+        {
+            state.target = lastTarget_;
+            state.du = lastTarget_.center.x - kAimU;
+            state.dv = lastTarget_.center.y - kAimV;
+            state.yawError = pixelToAngle(state.du, kFocalPx) * kYawSign;
+            state.pitchError = -pixelToAngle(state.dv, kFocalPx) * kPitchSign;
+            setTrackingCommand(state, feedback, feedbackValid, command);
+        }
+        else if (returnTimeout)
+        {
+            command.Gimbal_Ctrl = 1;
+            command.yaw_angle = static_cast<float>(kReturnYawAngle);
+            command.pitch_angle = static_cast<float>(kReturnPitchAngle);
+            state.returning = true;
+        }
+        else if (feedbackValid)
+        {
+            command.Gimbal_Ctrl = 1;
+            command.yaw_angle = feedback.yaw_angle;
+            command.pitch_angle = feedback.pitch_angle;
+        }
+        else
+        {
+            command.Gimbal_Ctrl = 2;
+            command.yaw_delta_angle = 0.0F;
+            command.pitch_delta_angle = 0.0F;
+        }
+
+        return state;
+    }
+
+private:
+    void updateTargetFilter(const BladeTarget& detectedTarget,
+                            std::chrono::steady_clock::time_point now)
+    {
+        if (detectedTarget.valid)
+        {
+            noTargetTimerStarted_ = false;
+            if (!hasFilter_ || lostFrames_ > kHoldFrames)
+            {
+                filtered_ = detectedTarget.center;
+                hasFilter_ = true;
+            }
+            else
+            {
+                filtered_.x = 0.7F * filtered_.x + 0.3F * detectedTarget.center.x;
+                filtered_.y = 0.7F * filtered_.y + 0.3F * detectedTarget.center.y;
+            }
+            lastTarget_ = detectedTarget;
+            lastTarget_.center = filtered_;
+            lostFrames_ = 0;
+            return;
+        }
+
+        if (!noTargetTimerStarted_)
+        {
+            noTargetSince_ = now;
+            noTargetTimerStarted_ = true;
+        }
+        if (lostFrames_ < 100000)
+            ++lostFrames_;
+    }
+
+    void setTrackingCommand(const GimbalControlState& state,
+                            const TRoMaC::GimbalFeedback& feedback,
+                            bool feedbackValid,
+                            TRoMaC::VisionData& command) const
+    {
+        if (feedbackValid)
+        {
+            command.Gimbal_Ctrl = 1;
+            command.yaw_angle = static_cast<float>(
+                feedback.yaw_angle + kGain * state.yawError + kYawBias);
+            command.pitch_angle = static_cast<float>(
+                feedback.pitch_angle + kGain * state.pitchError + kPitchBias);
+            return;
+        }
+
+        command.Gimbal_Ctrl = 2;
+        command.yaw_delta_angle = static_cast<float>(
+            clampValue(kGain * state.yawError, -kMaxStep, kMaxStep));
+        command.pitch_delta_angle = static_cast<float>(
+            clampValue(kGain * state.pitchError, -kMaxStep, kMaxStep));
+    }
+
+    BladeTarget lastTarget_;
+    cv::Point2f filtered_;
+    bool hasFilter_ = false;
+    int lostFrames_ = 100000;
+    bool noTargetTimerStarted_ = false;
+    std::chrono::steady_clock::time_point noTargetSince_;
+};
+
+class FireControlStateMachine
+{
+public:
+    enum class State
+    {
+        Disabled,
+        WaitingForAim,
+        ConfirmingAim
+    };
+
+    bool update(bool enabled, bool aimed)
+    {
+        if (!enabled)
+        {
+            state_ = State::Disabled;
+            aimedFrames_ = 0;
+            return false;
+        }
+
+        if (!aimed)
+        {
+            state_ = State::WaitingForAim;
+            aimedFrames_ = 0;
+            return false;
+        }
+
+        ++aimedFrames_;
+        if (aimedFrames_ < kAimFrames)
+        {
+            state_ = State::ConfirmingAim;
+            return false;
+        }
+
+        ++shotsFired_;
+        aimedFrames_ = 0;
+        state_ = State::WaitingForAim;
+        return true;
+    }
+
+    std::uint64_t shotsFired() const
+    {
+        return shotsFired_;
+    }
+
+    const char* stateName() const
+    {
+        switch (state_)
+        {
+            case State::Disabled:     return "OFF";
+            case State::WaitingForAim: return "WAIT AIM";
+            case State::ConfirmingAim: return "CONFIRM AIM";
+        }
+        return "UNKNOWN";
+    }
+
+private:
+    State state_ = State::Disabled;
+    int aimedFrames_ = 0;
+    std::uint64_t shotsFired_ = 0;
+};
 
 // 圆环检测
 namespace
@@ -566,6 +752,8 @@ int main()
     int exitCode = 0;
     std::thread sender;
     std::thread receiver;
+    GimbalTargetController gimbalController;
+    FireControlStateMachine fireController;
     if (useSerial)
     {
         receiver = std::thread(receiveLoop);
@@ -627,110 +815,30 @@ int main()
         // 找环
         cv::Mat mask;
         std::vector<cv::Rect> rings = detectColorRing(image, mask);
-        // 参考点
-        cv::Point2f reference;
-        if (g_hasFilter == true)
-        {
-            reference = g_filtered;
-        }
-        else
-        {
-            reference = cv::Point2f(static_cast<float>(kAimU), static_cast<float>(kAimV));
-        }
+        const cv::Point2f reference = gimbalController.referencePoint();
         BladeTarget target = pickTarget(rings, reference);
 
-        if (target.valid == true)
-        {
-            if (g_hasFilter == false || g_lostFrames > kHoldFrames)
-            {
-                g_filtered = target.center;   // 刚重新找到就直接贴上去
-                g_hasFilter = true;
-            }
-            else
-            {
-                // 低通
-                g_filtered.x = 0.7F * g_filtered.x + 0.3F * target.center.x;
-                g_filtered.y = 0.7F * g_filtered.y + 0.3F * target.center.y;
-            }
-            g_lastTarget = target;
-            g_lastTarget.center = g_filtered;
-            g_lostFrames = 0;
-        }
-        else if (g_lostFrames < 100000)
-        {
-            ++g_lostFrames;
-        }
-        const bool tracking = (g_hasFilter == true) && (g_lostFrames <= kHoldFrames);
-
-        // 换算成绝对角
-        double du = 0.0;
-        double dv = 0.0;
-        if (tracking == true)
-        {
-            du = g_lastTarget.center.x - kAimU;
-            dv = g_lastTarget.center.y - kAimV;
-        }
-        const double yawError = pixelToAngle(du, kFocalPx) * kYawSign;
-        const double pitchError = -pixelToAngle(dv, kFocalPx) * kPitchSign;
-
-        // 给云台下指令
-        if (tracking == true)
-        {
-            if (feedbackValid == true)
-            {
-                sendData.Gimbal_Ctrl = 1;
-                sendData.yaw_angle = static_cast<float>(
-                    feedback.yaw_angle + kGain * yawError + kYawBias);
-                sendData.pitch_angle = static_cast<float>(
-                    feedback.pitch_angle + kGain * pitchError + kPitchBias);
-            }
-            else
-            {
-                // 没反馈发增量
-                sendData.Gimbal_Ctrl = 2;
-                sendData.yaw_delta_angle = static_cast<float>(
-                    clampValue(kGain * yawError, -kMaxStep, kMaxStep));
-                sendData.pitch_delta_angle = static_cast<float>(
-                    clampValue(kGain * pitchError, -kMaxStep, kMaxStep));
-            }
-        }
-        else if (feedbackValid == true)
-        {
-            // 没目标就停在原地
-            sendData.Gimbal_Ctrl = 1;
-            sendData.yaw_angle = feedback.yaw_angle;
-            sendData.pitch_angle = feedback.pitch_angle;
-        }
+        const auto now = std::chrono::steady_clock::now();
+        const GimbalControlState controlState =
+            gimbalController.update(target, feedback, feedbackValid, sendData, now);
+        const bool tracking = controlState.tracking;
+        const double du = controlState.du;
+        const double dv = controlState.dv;
+        const double yawError = controlState.yawError;
+        const double pitchError = controlState.pitchError;
 
         // 对准了就开火
-        const auto now = std::chrono::steady_clock::now();
-
         const double tolDeg = pixelToAngle(kAimTolPx, kFocalPx);
         const bool aimed = (tracking == true) &&
                            (std::fabs(yawError) <= tolDeg) &&
                            (std::fabs(pitchError) <= tolDeg);
-        if (aimed == true)
-        {
-            g_aimedFrames = g_aimedFrames + 1;
-        }
-        else
-        {
-            g_aimedFrames = 0;
-        }
-
-        const auto sinceLastShot = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - g_lastShotAt).count();
-        if ((kEnableFire == true) && (g_shotsFired < kMaxShots) &&
-            (g_aimedFrames >= kAimFrames) && (sinceLastShot >= kShotIntervalMs))
+        if (fireController.update(kEnableFire, aimed))
         {
             // 开火
             sendData.fric = 1;
-            sendData.Auto_Push = 1;
+            sendData.Auto_Push = 0;
             sendData.Push_flag = 1;
-            ++g_shotsFired;
-            g_aimedFrames = 0;
-            g_lastShotAt = now;
-            std::cout << "[FIRE] 第 " << g_shotsFired << " 发"
+            std::cout << "[FIRE] 第 " << fireController.shotsFired() << " 发"
                       << " du=" << du << " dv=" << dv << '\n';
         }
 
@@ -739,8 +847,8 @@ int main()
                    6, cv::Scalar(0, 255, 0), 2);
         if (tracking == true)
         {
-            const cv::Point center(static_cast<int>(g_lastTarget.center.x),
-                                   static_cast<int>(g_lastTarget.center.y));
+            const cv::Point center(static_cast<int>(controlState.target.center.x),
+                                   static_cast<int>(controlState.target.center.y));
             cv::Scalar color;
             if (aimed == true)
             {
@@ -750,7 +858,7 @@ int main()
             {
                 color = cv::Scalar(0, 0, 255);
             }
-            cv::circle(image, center, static_cast<int>(g_lastTarget.radius), color, 2);
+            cv::circle(image, center, static_cast<int>(controlState.target.radius), color, 2);
             cv::line(image, center,
                      cv::Point(static_cast<int>(kAimU), static_cast<int>(kAimV)),
                      cv::Scalar(0, 255, 255), 1);
@@ -764,22 +872,14 @@ int main()
         }
         else
         {
-            cv::putText(image, "NO TARGET", cv::Point(10, 30),
+            const char* statusText = controlState.returning ? "RETURNING" : "NO TARGET";
+            cv::putText(image, statusText, cv::Point(10, 30),
                         cv::FONT_HERSHEY_SIMPLEX, 0.9, cv::Scalar(0, 0, 255), 2);
         }
-        std::string fireText;
-        cv::Scalar fireColor;
-        if (kEnableFire == true)
-        {
-            fireText = " FIRE ON";
-            fireColor = cv::Scalar(0, 0, 255);
-        }
-        else
-        {
-            fireText = " FIRE OFF";
-            fireColor = cv::Scalar(0, 255, 0);
-        }
-        cv::putText(image, "shots=" + std::to_string(g_shotsFired) + fireText,
+        const std::string fireText = " " + std::string(fireController.stateName());
+        const cv::Scalar fireColor = kEnableFire ? cv::Scalar(0, 0, 255)
+                                                  : cv::Scalar(0, 255, 0);
+        cv::putText(image, "shots=" + std::to_string(fireController.shotsFired()) + fireText,
                     cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 0.7, fireColor, 2);
         std::string yawSignText;
         if (kYawSign > 0)
