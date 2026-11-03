@@ -18,6 +18,7 @@
 
 
 /*---------可自行添加：算法需要的头文件----------*/
+#include "SuperStructure.h"
 #include <string>
 #include <vector>
 /*---------添加区域结束----------*/
@@ -181,6 +182,7 @@ static cv::Scalar blue_high = cv::Scalar(130, 255, 255);   //
 struct BladeTarget
 {
     cv::Point2f center;          // 框中心
+    cv::Rect box;                 // 选中的框
     float radius = 0.0F;         // 框长边的一半
     double score = 0.0;          // 框的面积 调试用
     bool valid = false;          // 这帧有没有找到
@@ -210,9 +212,6 @@ static int    kMaxShots = 10;           // 一场就 10 发
 
 // 跨帧要记住的
 static BladeTarget g_lastTarget;
-static cv::Point2f g_filtered;                // 滤波后的点
-static bool g_hasFilter = false;
-static int  g_lostFrames = 100000;
 static int  g_aimedFrames = 0;
 static int  g_shotsFired = 0;
 static int  g_frameIndex = 0;
@@ -304,11 +303,11 @@ static double clampValue(double value, double low, double high)
     return value;
 }
 
-// 像素差转角度 （单位：度）
 static double pixelToAngle(double pixels, double focalPx)
 {
     return std::atan(pixels / focalPx) * 180.0 / CV_PI;
 }
+
 
 // 圆环检测
 namespace
@@ -481,19 +480,25 @@ std::vector<Rect> detectColorRing(const Mat& frame, Mat& maskOut)
     return targetBoxs;
 }
 
-// 多个环挑一个
-BladeTarget pickTarget(const std::vector<Rect>& boxes, const Point2f& reference)
+cv::Point2f getTargetCenter(const cv::Rect& box)
+{
+    return cv::Point2f(box.x + box.width * 0.5F, box.y + box.height * 0.5F);
+}
+
+// 多个环直接选最大的
+BladeTarget pickTarget(const std::vector<Rect>& boxes)
 {
     BladeTarget best;
-    double bestDist = 0.0;
+    double bestArea = 0.0;
     for (std::size_t i = 0; i < boxes.size(); ++i)
     {
         const Point2f c(boxes[i].x + boxes[i].width * 0.5F,
                         boxes[i].y + boxes[i].height * 0.5F);
-        const double d = std::hypot(c.x - reference.x, c.y - reference.y);
-        if (best.valid == false || d < bestDist)
+        const double area = static_cast<double>(boxes[i].area());
+        if (best.valid == false || area > bestArea)
         {
             best.center = c;
+            best.box = boxes[i];
             if (boxes[i].width > boxes[i].height)
             {
                 best.radius = boxes[i].width * 0.5F;
@@ -502,9 +507,9 @@ BladeTarget pickTarget(const std::vector<Rect>& boxes, const Point2f& reference)
             {
                 best.radius = boxes[i].height * 0.5F;
             }
-            best.score = static_cast<double>(boxes[i].area());
+            best.score = area;
             best.valid = true;
-            bestDist = d;
+            bestArea = area;
         }
     }
     return best;
@@ -572,6 +577,7 @@ int main()
         sender = std::thread(sendLoop);
     }
 
+    const auto controllerStart = std::chrono::steady_clock::now();
     while (running.load())
     {
         // ===== 2. 取图：image 就是这一帧的 BGR 图像 =====
@@ -627,40 +633,25 @@ int main()
         // 找环
         cv::Mat mask;
         std::vector<cv::Rect> rings = detectColorRing(image, mask);
-        // 参考点
-        cv::Point2f reference;
-        if (g_hasFilter == true)
-        {
-            reference = g_filtered;
-        }
-        else
-        {
-            reference = cv::Point2f(static_cast<float>(kAimU), static_cast<float>(kAimV));
-        }
-        BladeTarget target = pickTarget(rings, reference);
+        BladeTarget target = pickTarget(rings);
 
         if (target.valid == true)
         {
-            if (g_hasFilter == false || g_lostFrames > kHoldFrames)
-            {
-                g_filtered = target.center;   // 刚重新找到就直接贴上去
-                g_hasFilter = true;
-            }
-            else
-            {
-                // 低通
-                g_filtered.x = 0.7F * g_filtered.x + 0.3F * target.center.x;
-                g_filtered.y = 0.7F * g_filtered.y + 0.3F * target.center.y;
-            }
             g_lastTarget = target;
-            g_lastTarget.center = g_filtered;
-            g_lostFrames = 0;
         }
-        else if (g_lostFrames < 100000)
+        const bool tracking = target.valid;
+
+        std::vector<cv::Rect> selectedBoxes;
+        if (tracking)
         {
-            ++g_lostFrames;
+            selectedBoxes.push_back(target.box);
         }
-        const bool tracking = (g_hasFilter == true) && (g_lostFrames <= kHoldFrames);
+        updateSuperStructureBoxes(BoxContainer(selectedBoxes));
+        const int controllerNow = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                frameReceivedAt - controllerStart).count());
+        periodicSuperStructure(feedback, controllerNow);
+        const OutputData& controllerOutput = getSuperStructureOutput();
 
         // 换算成绝对角
         double du = 0.0;
@@ -673,33 +664,20 @@ int main()
         const double yawError = pixelToAngle(du, kFocalPx) * kYawSign;
         const double pitchError = -pixelToAngle(dv, kFocalPx) * kPitchSign;
 
-        // 给云台下指令
-        if (tracking == true)
+        // 有反馈时使用状态机的绝对角；无反馈时保留原有增量控制。
+        if (feedbackValid == true)
         {
-            if (feedbackValid == true)
-            {
-                sendData.Gimbal_Ctrl = 1;
-                sendData.yaw_angle = static_cast<float>(
-                    feedback.yaw_angle + kGain * yawError + kYawBias);
-                sendData.pitch_angle = static_cast<float>(
-                    feedback.pitch_angle + kGain * pitchError + kPitchBias);
-            }
-            else
-            {
-                // 没反馈发增量
-                sendData.Gimbal_Ctrl = 2;
-                sendData.yaw_delta_angle = static_cast<float>(
-                    clampValue(kGain * yawError, -kMaxStep, kMaxStep));
-                sendData.pitch_delta_angle = static_cast<float>(
-                    clampValue(kGain * pitchError, -kMaxStep, kMaxStep));
-            }
-        }
-        else if (feedbackValid == true)
-        {
-            // 没目标就停在原地
             sendData.Gimbal_Ctrl = 1;
-            sendData.yaw_angle = feedback.yaw_angle;
-            sendData.pitch_angle = feedback.pitch_angle;
+            sendData.yaw_angle = static_cast<float>(controllerOutput.axis.yaw);
+            sendData.pitch_angle = static_cast<float>(controllerOutput.axis.pitch);
+        }
+        else if (tracking == true)
+        {
+            sendData.Gimbal_Ctrl = 2;
+            sendData.yaw_delta_angle = static_cast<float>(
+                clampValue(kGain * yawError, -kMaxStep, kMaxStep));
+            sendData.pitch_delta_angle = static_cast<float>(
+                clampValue(kGain * pitchError, -kMaxStep, kMaxStep));
         }
 
         // 对准了就开火
@@ -720,12 +698,11 @@ int main()
 
         const auto sinceLastShot = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - g_lastShotAt).count();
-        if ((kEnableFire == true) && (g_shotsFired < kMaxShots) &&
-            (g_aimedFrames >= kAimFrames) && (sinceLastShot >= kShotIntervalMs))
+        if ((kEnableFire == true) && (sinceLastShot >= kShotIntervalMs))
         {
             // 开火
             sendData.fric = 1;
-            sendData.Auto_Push = 1;
+            sendData.Auto_Push = 0;
             sendData.Push_flag = 1;
             ++g_shotsFired;
             g_aimedFrames = 0;
