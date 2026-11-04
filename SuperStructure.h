@@ -21,10 +21,6 @@ struct OutputData
     bool useABSposition = true;
 };
 
-void updateSuperStructureBoxes(const BoxContainer& boxes);
-void periodicSuperStructure(const TRoMaC::GimbalFeedback& feedback, int now);
-const OutputData& getSuperStructureOutput();
-const char* getSuperStructureStateName();
-bool isSuperStructureAimed();
+
 
 #endif // SUPER_STRUCTURE_H_

@@ -19,7 +19,7 @@
 
 /*---------可自行添加：算法需要的头文件----------*/
 #include "SuperStructure.h"
-#include "AimedDebouncer.h"
+#include "Debouncer.h"
 #include <string>
 #include <vector>
 /*---------添加区域结束----------*/
@@ -228,6 +228,10 @@ static std::chrono::steady_clock::time_point g_lastShotAt =
     std::chrono::steady_clock::now() - std::chrono::seconds(10);   // 开机就能打
 static std::chrono::steady_clock::time_point g_pushRetractStartedAt;
 
+
+//初始化
+Debouncer aimedDebouncer(10);
+SuperStructure superStructure;
 /*---------全局变量编写区域结束----------*/
 
 
@@ -625,7 +629,6 @@ int main()
 
     const auto controllerStart = std::chrono::steady_clock::now();
     g_lastControlAt = controllerStart;
-    AimedDebouncer aimedDebouncer(10);
     while (running.load())
     {
         // ===== 2. 取图：image 就是这一帧的 BGR 图像 =====
@@ -664,7 +667,7 @@ int main()
         // 输出：修改 sendData 的字段；不用自己调用串口发送函数。
 
         // 默认不产生增量；找到目标后再按图像偏差计算增量。
-        sendData.Gimbal_Ctrl = 2;          // 2：增量控制；1：绝对角度控制。
+        sendData.Gimbal_Ctrl = 1;          // 2：增量控制；1：绝对角度控制。
         sendData.pitch_delta_angle = 0.0F;
         sendData.yaw_delta_angle = 0.0F;
         sendData.pitch_angle = 0.0F;
@@ -696,11 +699,11 @@ int main()
         {
             selectedBoxes.push_back(target.box);
         }
-        updateSuperStructureBoxes(BoxContainer(selectedBoxes));
+        superStructure.updateBoxes(BoxContainer(selectedBoxes));
         const int controllerNow = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 frameReceivedAt - controllerStart).count());
-        periodicSuperStructure(feedback, controllerNow);
+        superStructure.periodic(feedback, controllerNow);
 
         // 换算成绝对角
         double du = 0.0;
@@ -769,7 +772,7 @@ int main()
         // 对准了就开火
         const auto now = std::chrono::steady_clock::now();
 
-        const bool aimed = aimedDebouncer.update(isSuperStructureAimed());
+        const bool aimed = aimedDebouncer.update(superStructure.isAimed());
         sendData.Push_flag = updateFireControl(aimed, now);
 
         // 画图
@@ -830,7 +833,7 @@ int main()
                     feedbackValid ? cv::Scalar(255, 255, 255)
                                   : (feedbackReceived ? cv::Scalar(0, 165, 255)
                                                       : cv::Scalar(0, 0, 255)), 2);
-        cv::putText(image, std::string("state=") + getSuperStructureStateName(),
+        cv::putText(image, std::string("state=") + superStructure.stateName(),
                     cv::Point(10, 150), cv::FONT_HERSHEY_SIMPLEX, 0.65,
                     cv::Scalar(255, 255, 255), 2);
         cv::putText(image, std::string("color: ") + targetColorName(),

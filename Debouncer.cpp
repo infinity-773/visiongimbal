@@ -1,8 +1,8 @@
-#include "AimedDebouncer.h"
+#include "Debouncer.h"
 
 #include <algorithm>
 
-AimedDebouncer::AimedDebouncer(unsigned int requiredSamples)
+Debouncer::Debouncer(unsigned int requiredSamples)
     : requiredSamples_(std::max(1U, requiredSamples)),
       candidateSamples_(0),
       stableAimed_(false),
@@ -10,7 +10,7 @@ AimedDebouncer::AimedDebouncer(unsigned int requiredSamples)
 {
 }
 
-bool AimedDebouncer::update(bool aimed)
+bool Debouncer::update(bool aimed)
 {
     if (aimed == stableAimed_)
     {
@@ -38,7 +38,7 @@ bool AimedDebouncer::update(bool aimed)
     return stableAimed_;
 }
 
-void AimedDebouncer::reset(bool aimed)
+void Debouncer::reset(bool aimed)
 {
     stableAimed_ = aimed;
     candidateAimed_ = aimed;

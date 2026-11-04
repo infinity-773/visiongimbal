@@ -1,10 +1,10 @@
-#ifndef AIMED_DEBOUNCER_H_
-#define AIMED_DEBOUNCER_H_
+#ifndef DEBOUNCER_H_
+#define DEBOUNCER_H_
 
-class AimedDebouncer
+class Debouncer
 {
 public:
-    explicit AimedDebouncer(unsigned int requiredSamples = 3);
+    explicit Debouncer(unsigned int requiredSamples = 8);
 
     bool update(bool aimed);
     void reset(bool aimed = false);

@@ -174,32 +174,3 @@ private:
     }
 };
 
-namespace
-{
-SuperStructure superStructure;
-}
-
-void updateSuperStructureBoxes(const BoxContainer& boxes)
-{
-    superStructure.updateBoxes(boxes);
-}
-
-void periodicSuperStructure(const TRoMaC::GimbalFeedback& feedback, int now)
-{
-    superStructure.periodic(feedback, now);
-}
-
-const OutputData& getSuperStructureOutput()
-{
-    return superStructure.getoutput();
-}
-
-const char* getSuperStructureStateName()
-{
-    return superStructure.getstateName();
-}
-
-bool isSuperStructureAimed()
-{
-    return superStructure.isAimed();
-}
