@@ -7,8 +7,8 @@
  static double ZERO_YAW = 0.0;
  static int STAY_TIME = 1000; // ms
  static double PITCH_BIAS = 0.0; //g补偿
- static double GAIN = 0.8;
- static axisData CAMERA_BIAS(1.0, 0.0); //相机偏差
+ static double GAIN = 0.07;
+ static axisData CAMERA_BIAS(0.0, 0.0); //相机偏差
 
 enum class State
 {
@@ -54,8 +54,8 @@ public:
             if (targetValid)//目标一直存在 -> 持续跟随
             {
                 output_.axis = getAxissetpoint(target);
-                if (std::fabs(feedbackData_.yaw - output_.axis.yaw) < 0.5 &&
-                    std::fabs(feedbackData_.pitch - output_.axis.pitch) < 0.5)
+                if (std::fabs(feedbackData_.yaw - output_.axis.yaw) < 0.2 &&
+                    std::fabs(feedbackData_.pitch - output_.axis.pitch) < 0.2)
                 {
                     state_ = State::aimed;
                 }
@@ -72,8 +72,14 @@ public:
                 state_ = State::lost;
                 targetLostAt_ = now;
             }
-            else{//目标一直存在 -> 持续跟随
+            else
+            {
                 output_.axis = getAxissetpoint(target);
+                if (std::fabs(feedbackData_.yaw - output_.axis.yaw) >= 0.2 ||
+                    std::fabs(feedbackData_.pitch - output_.axis.pitch) >= 0.2)
+                {
+                    state_ = State::aiming;
+                }
             }
             break;
 
@@ -122,9 +128,22 @@ public:
         return output_;
     }
 
-    State getstate() const
+    const char* getstateName() const
     {
-        return state_;
+        switch (state_)
+        {
+        case State::aiming: return "aiming";
+        case State::aimed: return "aimed";
+        case State::zeroing: return "zeroing";
+        case State::zeroed: return "zeroed";
+        case State::lost: return "lost";
+        }
+        return "unknown";
+    }
+
+    bool isAimed() const
+    {
+        return state_ == State::aimed && boxes_.size() == 1;
     }
 
 private:
@@ -140,8 +159,8 @@ private:
         constexpr double aimV = 360.0; //图像中心
         constexpr double focalPx = 700.0; //相机焦距像素值
 
-        const double yawError = pixelToAngle(target.x - aimU, focalPx);
-        const double pitchError = -pixelToAngle(target.y - aimV, focalPx);
+        const double yawError = -pixelToAngle(target.x - aimU, focalPx);
+        const double pitchError = pixelToAngle(target.y - aimV, focalPx);
 
         return axisData(
             feedbackData_.yaw + GAIN * yawError + CAMERA_BIAS.yaw,
@@ -173,4 +192,14 @@ void periodicSuperStructure(const TRoMaC::GimbalFeedback& feedback, int now)
 const OutputData& getSuperStructureOutput()
 {
     return superStructure.getoutput();
+}
+
+const char* getSuperStructureStateName()
+{
+    return superStructure.getstateName();
+}
+
+bool isSuperStructureAimed()
+{
+    return superStructure.isAimed();
 }

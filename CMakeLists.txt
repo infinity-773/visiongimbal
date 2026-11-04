@@ -10,7 +10,10 @@ find_package(Threads REQUIRED)
 
 add_subdirectory(Serial)
 
-add_executable(vision_gimbal vision_gimbal.cpp SuperStructure.cpp)
+add_executable(vision_gimbal
+    vision_gimbal.cpp
+    SuperStructure.cpp
+    AimedDebouncer.cpp)
 target_include_directories(vision_gimbal PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/Serial
