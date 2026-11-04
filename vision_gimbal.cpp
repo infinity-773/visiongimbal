@@ -833,7 +833,7 @@ int main()
                     feedbackValid ? cv::Scalar(255, 255, 255)
                                   : (feedbackReceived ? cv::Scalar(0, 165, 255)
                                                       : cv::Scalar(0, 0, 255)), 2);
-        cv::putText(image, std::string("state=") + superStructure.stateName(),
+        cv::putText(image, std::string("state=") + superStructure.getstateName(),
                     cv::Point(10, 150), cv::FONT_HERSHEY_SIMPLEX, 0.65,
                     cv::Scalar(255, 255, 255), 2);
         cv::putText(image, std::string("color: ") + targetColorName(),
