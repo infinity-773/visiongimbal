@@ -20,6 +20,7 @@
 /*---------可自行添加：算法需要的头文件----------*/
 #include "SuperStructure.h"
 #include "Debouncer.h"
+#include "MathUtils.h"
 #include <string>
 #include <vector>
 /*---------添加区域结束----------*/
@@ -202,11 +203,14 @@ static double kYawSign = 1.0;       // 图像往右 yaw 变大填 1 变小填 -1
 static double kPitchSign = 1.0;     // 图像往上 pitch 变大填 1 变小填 -1（需调参）
 static double kYawBias = 0.0;       // 固定的角度偏差（需调参）
 static double kPitchBias = 0.0;     // 弹道下坠 远了要加（需调参）
-static double kGain = 0.1;          // 增量控制比例，抖就调小，响应慢就调大
-static double kIntegralGain = 0.3; // 积分比例，稳态误差大时可小幅调大
+static double kp = 0.1;          // PID 比例项
+static double ki = 0.3; // PID 积分项
+static double kd = 0.0; // PID 微分项
 static double kIntegralLimit = 3.0; // 积分限幅，单位：度·秒
 static double kControlDeadbandPx = 2; // 小于此像素误差时停止微调，避免识别抖动
-static double kMaxStep = 4.0;       // 每帧最大角度增量，单位度
+static double kMaxStep = 4.0;       // PID 输出限幅，单位度
+// 可选 Position（绝对角度）或 Incremental（角度增量）。
+static ControlOutputMode kControlOutputMode = ControlOutputMode::Incremental;
 
 // 开火
 static double kAimTolPx = 5;         // 差多少像素算对准（需调参）
@@ -215,14 +219,11 @@ static int    kShotIntervalMs = 800;    // 两发之间隔多久（需调参）
 static int    kPushRetractMs = 200;     // 发射时推杆回缩时间，之后恢复伸出并保持
 
 // 跨帧要记住的
-static BladeTarget g_lastTarget;
 static int  g_aimedFrames = 0;
 static int  g_shotsFired = 0;
 static bool g_shotArmed = true;
 static bool g_pushRetracting = false;
 static int  g_frameIndex = 0;
-static double g_yawErrorIntegral = 0.0;
-static double g_pitchErrorIntegral = 0.0;
 static std::chrono::steady_clock::time_point g_lastControlAt;
 static std::chrono::steady_clock::time_point g_lastShotAt =
     std::chrono::steady_clock::now() - std::chrono::seconds(10);   // 开机就能打
@@ -231,7 +232,25 @@ static std::chrono::steady_clock::time_point g_pushRetractStartedAt;
 
 //初始化
 Debouncer aimedDebouncer(10);
-SuperStructure superStructure;
+static SuperStructureConfig makeSuperStructureConfig()
+{
+    SuperStructureConfig config;
+    config.aimU = kAimU;
+    config.aimV = kAimV;
+    config.focalLengthPx = kFocalPx;
+    config.yawSign = kYawSign;
+    config.pitchSign = kPitchSign;
+    config.yawBias = kYawBias;
+    config.pitchBias = kPitchBias;
+    config.deadbandPx = kControlDeadbandPx;
+    config.aimTolerancePx = kAimTolPx;
+    config.yawPid = PIDConfig(kp, ki, kd,
+                              -kIntegralLimit, kIntegralLimit,
+                              -kMaxStep, kMaxStep);
+    config.pitchPid = config.yawPid;
+    return config;
+}
+SuperStructure superStructure(makeSuperStructureConfig(), kControlOutputMode);
 /*---------全局变量编写区域结束----------*/
 
 
@@ -303,19 +322,6 @@ void receiveLoop()
 /*---------需要编写：自己的算法函数（按需添加）----------*/
 // 在这里定义圆环识别、弹道解算等函数，再到主循环的动手区调用。
 
-static double clampValue(double value, double low, double high)
-{
-    if (value < low)
-    {
-        return low;
-    }
-    if (value > high)
-    {
-        return high;
-    }
-    return value;
-}
-
 static uint8_t updateFireControl(bool aimed, std::chrono::steady_clock::time_point now)
 {
     if (aimed)
@@ -352,12 +358,6 @@ static uint8_t updateFireControl(bool aimed, std::chrono::steady_clock::time_poi
 
     return g_pushRetracting ? 0 : 1;
 }
-
-static double pixelToAngle(double pixels, double focalPx)
-{
-    return std::atan(pixels / focalPx) * 180.0 / CV_PI;
-}
-
 
 // 圆环检测
 namespace
@@ -666,7 +666,7 @@ int main()
         // 输入：image 是当前图像；feedback 是角度反馈，仅 feedbackValid 为 true 时可用。
         // 输出：修改 sendData 的字段；不用自己调用串口发送函数。
 
-        // 默认不产生增量；找到目标后再按图像偏差计算增量。
+        // 控制量由 SuperStructure 状态机根据输出模式填写。
         sendData.Gimbal_Ctrl = 1;          // 2：增量控制；1：绝对角度控制。
         sendData.pitch_delta_angle = 0.0F;
         sendData.yaw_delta_angle = 0.0F;
@@ -677,25 +677,15 @@ int main()
         sendData.Push_flag = 1;
 
         // 从这里往下写自己的代码：
-        // 第一步：转 HSV、提取红色，imshow 显示二值图，调颜色阈值。
-        // 第二步：找轮廓，筛选圆环，在 image 上画出目标中心。
-        // 第三步：计算目标与图像中心的像素偏差，转换为角度增量，填到上面字段。
-        // 控制增量只依赖图像偏差，不使用云台角度反馈。
-        // 需要跨帧保存的量写到上面的“自己的全局变量和算法参数”区域。
+        // 检测目标并交给状态机；PID 和位置/增量输出均由状态机负责。
 
         // 找环
         cv::Mat mask;
         std::vector<cv::Rect> rings = detectColorRing(image, mask);
         BladeTarget target = pickTarget(rings);
 
-        if (target.valid == true)
-        {
-            g_lastTarget = target;
-        }
-        const bool tracking = target.valid;
-
         std::vector<cv::Rect> selectedBoxes;
-        if (tracking)
+        if (target.valid)
         {
             selectedBoxes.push_back(target.box);
         }
@@ -703,70 +693,28 @@ int main()
         const int controllerNow = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 frameReceivedAt - controllerStart).count());
-        superStructure.periodic(feedback, controllerNow);
-
-        // 换算成绝对角
-        double du = 0.0;
-        double dv = 0.0;
-        if (tracking == true)
-        {
-            du = g_lastTarget.center.x - kAimU;
-            dv = g_lastTarget.center.y - kAimV;
-        }
-        const double yawError = pixelToAngle(du, kFocalPx) * kYawSign;
-        const double pitchError = -pixelToAngle(dv, kFocalPx) * kPitchSign;
-
         const double controlDt = clampValue(
             std::chrono::duration<double>(frameReceivedAt - g_lastControlAt).count(),
-            0.0, 0.1);
+            0.001, 0.1);
         g_lastControlAt = frameReceivedAt;
+        superStructure.periodic(feedback, controllerNow, controlDt, feedbackValid);
 
-        // 对持续存在的视觉误差做有限幅积分，补偿机构的小稳态误差。
-        if (tracking)
+        const OutputData& controlOutput = superStructure.getoutput();
+        if (!feedbackValid)
         {
-            if (std::fabs(du) <= kControlDeadbandPx)
-            {
-                g_yawErrorIntegral = 0.0;
-            }
-            else
-            {
-                g_yawErrorIntegral = clampValue(
-                    g_yawErrorIntegral + yawError * controlDt,
-                    -kIntegralLimit, kIntegralLimit);
-            }
-
-            if (std::fabs(dv) <= kControlDeadbandPx)
-            {
-                g_pitchErrorIntegral = 0.0;
-            }
-            else
-            {
-                g_pitchErrorIntegral = clampValue(
-                    g_pitchErrorIntegral + pitchError * controlDt,
-                    -kIntegralLimit, kIntegralLimit);
-            }
+            sendData.Gimbal_Ctrl = 2;
+        }
+        else if (controlOutput.mode == ControlOutputMode::Position)
+        {
+            sendData.Gimbal_Ctrl = 1;
+            sendData.yaw_angle = static_cast<float>(controlOutput.axis.yaw);
+            sendData.pitch_angle = static_cast<float>(controlOutput.axis.pitch);
         }
         else
         {
-            g_yawErrorIntegral = 0.0;
-            g_pitchErrorIntegral = 0.0;
-        }
-
-        // 输出层反转 yaw、pitch 方向；无目标或死区内时增量保持为 0。
-        sendData.Gimbal_Ctrl = 2;
-        if (tracking && std::fabs(du) > kControlDeadbandPx)
-        {
-            sendData.yaw_delta_angle = static_cast<float>(
-                clampValue(-(kGain * yawError +
-                             kIntegralGain * g_yawErrorIntegral),
-                           -kMaxStep, kMaxStep));
-        }
-        if (tracking && std::fabs(dv) > kControlDeadbandPx)
-        {
-            sendData.pitch_delta_angle = static_cast<float>(
-                clampValue(-(kGain * pitchError +
-                             kIntegralGain * g_pitchErrorIntegral),
-                           -kMaxStep, kMaxStep));
+            sendData.Gimbal_Ctrl = 2;
+            sendData.yaw_delta_angle = static_cast<float>(controlOutput.axis.yaw);
+            sendData.pitch_delta_angle = static_cast<float>(controlOutput.axis.pitch);
         }
 
         // 对准了就开火
@@ -778,10 +726,10 @@ int main()
         // 画图
         cv::circle(image, cv::Point(static_cast<int>(kAimU), static_cast<int>(kAimV)),
                    6, cv::Scalar(0, 255, 0), 2);
-        if (tracking == true)
+        if (target.valid)
         {
-            const cv::Point center(static_cast<int>(g_lastTarget.center.x),
-                                   static_cast<int>(g_lastTarget.center.y));
+            const cv::Point center(static_cast<int>(target.center.x),
+                                   static_cast<int>(target.center.y));
             cv::Scalar color;
             if (aimed == true)
             {
@@ -791,15 +739,19 @@ int main()
             {
                 color = cv::Scalar(0, 0, 255);
             }
-            cv::circle(image, center, static_cast<int>(g_lastTarget.radius), color, 2);
+            cv::circle(image, center, static_cast<int>(target.radius), color, 2);
             cv::line(image, center,
                      cv::Point(static_cast<int>(kAimU), static_cast<int>(kAimV)),
                      cv::Scalar(0, 255, 255), 1);
             cv::putText(image,
-                        "du=" + std::to_string(static_cast<int>(du)) +
-                            " dv=" + std::to_string(static_cast<int>(dv)) +
-                            " yaw=" + std::to_string(static_cast<int>(yawError)) +
-                            " pitch=" + std::to_string(static_cast<int>(pitchError)),
+                        "du=" + std::to_string(
+                            static_cast<int>(controlOutput.targetOffsetPx.yaw)) +
+                            " dv=" + std::to_string(
+                            static_cast<int>(controlOutput.targetOffsetPx.pitch)) +
+                            " yaw=" + std::to_string(
+                            static_cast<int>(controlOutput.targetAngleError.yaw)) +
+                            " pitch=" + std::to_string(
+                            static_cast<int>(controlOutput.targetAngleError.pitch)),
                         cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.7,
                         cv::Scalar(0, 255, 255), 2);
         }
@@ -887,8 +839,10 @@ int main()
             cv::putText(image,
                         "fps=" + std::to_string(static_cast<int>(fps + 0.5)) +
                             "  rings=" + std::to_string(static_cast<int>(rings.size())) +
-                            "  off=" + std::to_string(static_cast<int>(du)) + "," +
-                            std::to_string(static_cast<int>(dv)),
+                            "  off=" + std::to_string(static_cast<int>(
+                                controlOutput.targetOffsetPx.yaw)) + "," +
+                            std::to_string(static_cast<int>(
+                                controlOutput.targetOffsetPx.pitch)),
                         cv::Point(10, image.rows - 14), cv::FONT_HERSHEY_SIMPLEX, 0.5,
                         cv::Scalar(255, 255, 255), 1);
 

@@ -12,7 +12,9 @@ add_subdirectory(Serial)
 
 add_executable(vision_gimbal
     vision_gimbal.cpp
-    Debouncer.cpp)
+    Debouncer.cpp
+    PIDController.cpp
+    MathUtils.cpp)
 target_include_directories(vision_gimbal PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/Serial
