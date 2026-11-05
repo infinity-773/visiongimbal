@@ -39,7 +39,8 @@ class PIDController
 public:
     explicit PIDController(const PIDConfig& config = PIDConfig());
 
-    double update(double error, double dtSeconds, PIDMode mode);
+    double update(double error, double dtSeconds, PIDMode mode,
+                  bool integralEnabled = true);
     void reset();
 
 private:
@@ -48,11 +49,12 @@ private:
     double previousError_;
     double previousPreviousError_;
     double previousOutput_;
+    double incrementalIntegral_;
     bool hasPreviousError_;
     bool hasPreviousPreviousError_;
 
-    double updatePosition(double error, double dtSeconds);
-    double updateIncremental(double error, double dtSeconds);
+    double updatePosition(double error, double dtSeconds, bool integralEnabled);
+    double updateIncremental(double error, double dtSeconds, bool integralEnabled);
 };
 
 #endif // PID_CONTROLLER_H_

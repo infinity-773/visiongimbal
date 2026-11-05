@@ -2,8 +2,9 @@
 
 #include <algorithm>
 
-Debouncer::Debouncer(unsigned int requiredSamples)
+Debouncer::Debouncer(unsigned int requiredSamples, DebounceEdge edge)
     : requiredSamples_(std::max(1U, requiredSamples)),
+      edge_(edge),
       candidateSamples_(0),
       stableAimed_(false),
       candidateAimed_(false)
@@ -14,6 +15,16 @@ bool Debouncer::update(bool aimed)
 {
     if (aimed == stableAimed_)
     {
+        candidateAimed_ = aimed;
+        candidateSamples_ = 0;
+        return stableAimed_;
+    }
+
+    const bool rising = !stableAimed_ && aimed;
+    if ((edge_ == DebounceEdge::Rising && !rising) ||
+        (edge_ == DebounceEdge::Falling && rising))
+    {
+        stableAimed_ = aimed;
         candidateAimed_ = aimed;
         candidateSamples_ = 0;
         return stableAimed_;

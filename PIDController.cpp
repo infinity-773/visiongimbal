@@ -11,6 +11,7 @@ PIDController::PIDController(const PIDConfig& config)
       previousError_(0.0),
       previousPreviousError_(0.0),
       previousOutput_(0.0),
+      incrementalIntegral_(0.0),
       hasPreviousError_(false),
       hasPreviousPreviousError_(false)
 {
@@ -24,7 +25,10 @@ PIDController::PIDController(const PIDConfig& config)
     }
 }
 
-double PIDController::update(double error, double dtSeconds, PIDMode mode)
+double PIDController::update(double error,
+                             double dtSeconds,
+                             PIDMode mode,
+                             bool integralEnabled)
 {
     if (!std::isfinite(error) || !std::isfinite(dtSeconds) || dtSeconds <= 0.0)
     {
@@ -32,8 +36,8 @@ double PIDController::update(double error, double dtSeconds, PIDMode mode)
     }
 
     return mode == PIDMode::Position
-        ? updatePosition(error, dtSeconds)
-        : updateIncremental(error, dtSeconds);
+        ? updatePosition(error, dtSeconds, integralEnabled)
+        : updateIncremental(error, dtSeconds, integralEnabled);
 }
 
 void PIDController::reset()
@@ -42,21 +46,30 @@ void PIDController::reset()
     previousError_ = 0.0;
     previousPreviousError_ = 0.0;
     previousOutput_ = 0.0;
+    incrementalIntegral_ = 0.0;
     hasPreviousError_ = false;
     hasPreviousPreviousError_ = false;
 }
 
-double PIDController::updatePosition(double error, double dtSeconds)
+double PIDController::updatePosition(double error,
+                                     double dtSeconds,
+                                     bool integralEnabled)
 {
     const double derivative = hasPreviousError_
         ? (error - previousError_) / dtSeconds
         : 0.0;
-    const double candidateIntegral = clampValue(
-        integral_ + error * dtSeconds, config_.integralMin, config_.integralMax);
+    const double candidateIntegral = integralEnabled
+        ? clampValue(integral_ + error * dtSeconds,
+                     config_.integralMin, config_.integralMax)
+        : 0.0;
     const double candidateOutput =
         config_.kp * error + config_.ki * candidateIntegral + config_.kd * derivative;
 
-    if ((candidateOutput >= config_.outputMin && candidateOutput <= config_.outputMax) ||
+    if (!integralEnabled)
+    {
+        integral_ = 0.0;
+    }
+    else if ((candidateOutput >= config_.outputMin && candidateOutput <= config_.outputMax) ||
         (candidateOutput > config_.outputMax && error < 0.0) ||
         (candidateOutput < config_.outputMin && error > 0.0))
     {
@@ -71,20 +84,42 @@ double PIDController::updatePosition(double error, double dtSeconds)
     return output;
 }
 
-double PIDController::updateIncremental(double error, double dtSeconds)
+double PIDController::updateIncremental(double error,
+                                        double dtSeconds,
+                                        bool integralEnabled)
 {
+    if (!integralEnabled)
+    {
+        previousOutput_ = clampValue(
+            previousOutput_ - incrementalIntegral_,
+            config_.outputMin, config_.outputMax);
+        incrementalIntegral_ = 0.0;
+    }
+
     const double previousError = hasPreviousError_ ? previousError_ : error;
     const double previousPreviousError =
         hasPreviousPreviousError_ ? previousPreviousError_ : previousError;
-    const double deltaOutput =
-        config_.kp * (error - previousError) +
-        config_.ki * error * dtSeconds +
+    const double proportionalDelta = config_.kp * (error - previousError);
+    const double integralDelta = integralEnabled ? config_.ki * error * dtSeconds : 0.0;
+    const double derivativeDelta =
         config_.kd * (error - 2.0 * previousError + previousPreviousError) / dtSeconds;
+    const double outputWithoutIntegral =
+        previousOutput_ + proportionalDelta + derivativeDelta;
+    const double candidateOutput = outputWithoutIntegral + integralDelta;
+
+    const bool acceptIntegral = integralEnabled &&
+        ((candidateOutput >= config_.outputMin && candidateOutput <= config_.outputMax) ||
+         (candidateOutput > config_.outputMax && integralDelta < 0.0) ||
+         (candidateOutput < config_.outputMin && integralDelta > 0.0));
+    const double appliedIntegralDelta = acceptIntegral ? integralDelta : 0.0;
+    const double deltaOutput =
+        proportionalDelta + appliedIntegralDelta + derivativeDelta;
 
     const double limitedOutput = clampValue(
         previousOutput_ + deltaOutput, config_.outputMin, config_.outputMax);
     const double appliedDelta = limitedOutput - previousOutput_;
     previousOutput_ = limitedOutput;
+    incrementalIntegral_ += appliedIntegralDelta;
     previousPreviousError_ = previousError;
     hasPreviousPreviousError_ = hasPreviousError_;
     previousError_ = error;

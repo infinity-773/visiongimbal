@@ -191,32 +191,34 @@ struct BladeTarget
 };
 
 // 瞄准点 打完看偏哪边就往反方向挪
-static double kAimU = width * 0.5;   // （需调参）
+static double kAimU = width * 0.5 - 30;   // （需调参）
 static double kAimV = height * 0.5;   // （需调参）
 
 // 丢几帧还算有目标
 static int    kHoldFrames = 8;
 
 // 像素转角度
-static double kFocalPx = 600;     // （需调参）
+static double kFocalPx = 1300;     // （需调参）
 static double kYawSign = 1.0;       // 图像往右 yaw 变大填 1 变小填 -1（需调参）
 static double kPitchSign = 1.0;     // 图像往上 pitch 变大填 1 变小填 -1（需调参）
 static double kYawBias = 0.0;       // 固定的角度偏差（需调参）
 static double kPitchBias = 0.0;     // 弹道下坠 远了要加（需调参）
-static double kp = 0.1;          // PID 比例项
-static double ki = 0.3; // PID 积分项
+static double kp = 0.6;          // PID 比例项
+static double ki = 1.6; // PID 积分项
 static double kd = 0.0; // PID 微分项
-static double kIntegralLimit = 3.0; // 积分限幅，单位：度·秒
+static double kIntegralLimit = 1.5; // 积分限幅，单位：度·秒
 static double kControlDeadbandPx = 2; // 小于此像素误差时停止微调，避免识别抖动
 static double kMaxStep = 4.0;       // PID 输出限幅，单位度
 // 可选 Position（绝对角度）或 Incremental（角度增量）。
-static ControlOutputMode kControlOutputMode = ControlOutputMode::Incremental;
+static ControlOutputMode kControlOutputMode = ControlOutputMode::Position;
 
 // 开火
-static double kAimTolPx = 5;         // 差多少像素算对准（需调参）
+static double kAimTolPx = 13;         // 差多少像素算对准（需调参）
 static int    kAimFrames = 3;           // 连着几帧对上才打（需调参）
 static int    kShotIntervalMs = 800;    // 两发之间隔多久（需调参）
 static int    kPushRetractMs = 200;     // 发射时推杆回缩时间，之后恢复伸出并保持
+static double kIntegralEnableOffsetPx = 40.0; // 目标距中心不超过此值时启用积分
+static double kFireRearmOffsetPx = 50.0; // 目标偏离中心超过此值时重新允许开火
 
 // 跨帧要记住的
 static int  g_aimedFrames = 0;
@@ -231,7 +233,7 @@ static std::chrono::steady_clock::time_point g_pushRetractStartedAt;
 
 
 //初始化
-Debouncer aimedDebouncer(10);
+Debouncer aimedDebouncer(10, DebounceEdge::Rising);
 static SuperStructureConfig makeSuperStructureConfig()
 {
     SuperStructureConfig config;
@@ -244,6 +246,7 @@ static SuperStructureConfig makeSuperStructureConfig()
     config.pitchBias = kPitchBias;
     config.deadbandPx = kControlDeadbandPx;
     config.aimTolerancePx = kAimTolPx;
+    config.integralEnableOffsetPx = kIntegralEnableOffsetPx;
     config.yawPid = PIDConfig(kp, ki, kd,
                               -kIntegralLimit, kIntegralLimit,
                               -kMaxStep, kMaxStep);
@@ -653,9 +656,6 @@ int main()
             feedbackValid = feedbackReceived &&
                 std::chrono::steady_clock::now() - receivedAt < std::chrono::milliseconds(250);
         }
-        if (feedbackValid)
-            std::cout << "yaw=" << feedback.yaw_angle
-                      << " pitch=" << feedback.pitch_angle << '\n';
         // feedbackValid 为 true 才能使用 feedback，角度单位为度。
 
         // 每帧先清零控制量，推杆保持位由开火控制逻辑单独设置。
@@ -720,7 +720,19 @@ int main()
         // 对准了就开火
         const auto now = std::chrono::steady_clock::now();
 
-        const bool aimed = aimedDebouncer.update(superStructure.isAimed());
+        const bool targetMovedAway = target.valid &&
+            std::hypot(controlOutput.targetOffsetPx.yaw,
+                       controlOutput.targetOffsetPx.pitch) > kFireRearmOffsetPx;
+        bool aimed;
+        if (targetMovedAway)
+        {
+            aimedDebouncer.reset(false);
+            aimed = false;
+        }
+        else
+        {
+            aimed = aimedDebouncer.update(superStructure.isAimed());
+        }
         sendData.Push_flag = updateFireControl(aimed, now);
 
         // 画图

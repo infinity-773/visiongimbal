@@ -37,22 +37,24 @@ struct SuperStructureConfig
     double pitchBias;
     double deadbandPx;
     double aimTolerancePx;
+    double integralEnableOffsetPx;
     int stayTimeMs;
     PIDConfig yawPid;
     PIDConfig pitchPid;
 
     SuperStructureConfig()
         : zeroYaw(0.0),
-          zeroPitch(0.0),
+          zeroPitch(-3.0),
           aimU(640.0),
           aimV(360.0),
-          focalLengthPx(600.0),
+          focalLengthPx(1300.0),
           yawSign(1.0),
           pitchSign(1.0),
           yawBias(0.0),
           pitchBias(0.0),
           deadbandPx(2.0),
-          aimTolerancePx(5.0),
+          aimTolerancePx(10.0),
+          integralEnableOffsetPx(40.0),
           stayTimeMs(1000),
           yawPid(),
           pitchPid()
@@ -159,12 +161,12 @@ public:
             {
                 state_ = State::lost;
                 targetLostAt_ = now;
-                resetControllers();
                 incrementalBiasPending_ = false;
             }
             else if (feedbackValid_ && !isWithinAimTolerance(target))
             {
                 state_ = State::aiming;
+                resetControllers();
             }
             break;
 
@@ -336,6 +338,9 @@ private:
             : PIDMode::Incremental;
         const double yawPixelError = output_.targetOffsetPx.yaw;
         const double pitchPixelError = output_.targetOffsetPx.pitch;
+        const bool integralEnabled =
+            std::hypot(yawPixelError, pitchPixelError) <=
+            config_.integralEnableOffsetPx;
         double yawCorrection = 0.0;
         if (std::fabs(yawPixelError) <= config_.deadbandPx)
         {
@@ -343,7 +348,8 @@ private:
         }
         else
         {
-            yawCorrection = yawController_.update(yawTargetError(), dtSeconds, pidMode);
+            yawCorrection = yawController_.update(
+                yawTargetError(), dtSeconds, pidMode, integralEnabled);
         }
 
         double pitchCorrection = 0.0;
@@ -353,7 +359,8 @@ private:
         }
         else
         {
-            pitchCorrection = pitchController_.update(pitchTargetError(), dtSeconds, pidMode);
+            pitchCorrection = pitchController_.update(
+                pitchTargetError(), dtSeconds, pidMode, integralEnabled);
         }
 
         if (outputMode_ == ControlOutputMode::Position)
