@@ -677,8 +677,8 @@ int main()
         sendData.pitch_angle = 0.0F;
         sendData.yaw_angle = 0.0F;
         // 当前固定协议：左右摩擦轮目标速度、蜂鸣器和推杆标志。
-        sendData.left_speed = 660;
-        sendData.right_speed = 660;
+        sendData.left_speed = 800;
+        sendData.right_speed = 800;
         sendData.buzzer = 0;
         sendData.Push_flag = 1;
 
