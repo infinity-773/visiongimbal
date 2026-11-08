@@ -43,7 +43,7 @@ int height = 720;
 // 请求帧率
 // 上述 MJPG 分辨率均支持 25、30、60 fps；YUYV 仅列出 10 fps。
 // 长曝光、USB 带宽等因素仍可能使实际帧率降低。
-int fps = 30;
+int fps = 60;
 
 // 串口开关
 // 没接下位机时改成 false，只调图像。
@@ -78,7 +78,7 @@ int serialBaudRate = 230400;
 // 范围：OpenCV 后端允许 1～10 帧，默认 4；实际分配受驱动限制。
 // 作用：设为 1 可以减少排队的旧画面。
 // 注意：缓冲不是图像控制项，不能用 --list-ctrls 查询范围。
-int cameraBufferSize = 1;
+int cameraBufferSize = 0;
 
 
 // 【曝光与亮度】
@@ -93,12 +93,12 @@ int cameraAutoExposure = 1;
 // 单位：100 us，即 19 = 1.9 ms，166 = 16.6 ms。
 // 实际时间范围：0.1～1000 ms。
 // 作用：增大通常更亮，但运动拖影更明显，过长还可能降低实际帧率。
-int cameraExposure = 17;
+int cameraExposure = 10;
 
 // 亮度
 // 范围：-64～64，步长 1，默认 0。
 // 作用：调整画面整体明暗。
-int cameraBrightness = 17;
+int cameraBrightness = 10;
 
 // 对比度
 // 范围：0～100，步长 1，默认 35。
@@ -177,7 +177,7 @@ static cv::Scalar red_ranges_low[2]  = {cv::Scalar(0, 110, 137),   cv::Scalar(11
 static cv::Scalar red_ranges_high[2] = {cv::Scalar(168, 110, 137), cv::Scalar(179, 255, 255)};   // 
 
 // 蓝色一段
-static cv::Scalar blue_low  = cv::Scalar(100, 120, 80);   // 
+static cv::Scalar blue_low  = cv::Scalar(100, 120, 150);   // 
 static cv::Scalar blue_high = cv::Scalar(130, 255, 255);   // 
 
 // 识别到的目标
@@ -191,7 +191,7 @@ struct BladeTarget
 };
 
 // 瞄准点 打完看偏哪边就往反方向挪
-static double kAimU = width * 0.5 - 30;   // （需调参）
+static double kAimU = width * 0.5 ;   // （需调参）
 static double kAimV = height * 0.5;   // （需调参）
 
 // 丢几帧还算有目标
@@ -206,22 +206,22 @@ static double kRotationPitchSign = 1.0;
 static double kPredictionSeconds = 0.15;
 static double kYawBias = 0.0;       // 固定的角度偏差（需调参）
 static double kPitchBias = 0.0;     // 弹道下坠 远了要加（需调参）
-static double kp = 0.6;          // PID 比例项
-static double ki = 1.6; // PID 积分项
+static double kp = 0.5;          // PID 比例项
+static double ki = 1.7; // PID 积分项
 static double kd = 0.0; // PID 微分项
 static double kIntegralLimit = 1.5; // 积分限幅，单位：度·秒
-static double kControlDeadbandPx = 2; // 小于此像素误差时停止微调，避免识别抖动
+static double kControlDeadbandPx = 5; // 小于此像素误差时停止微调，避免识别抖动
 static double kMaxStep = 4.0;       // PID 输出限幅，单位度
 // 可选 Position（绝对角度）或 Incremental（角度增量）。
 static ControlOutputMode kControlOutputMode = ControlOutputMode::Position;
 
 // 开火
-static double kAimTolPx = 13;         // 差多少像素算对准（需调参）
+static double kAimTolPx = 15;         // 差多少像素算对准（需调参）
 static int    kAimFrames = 3;           // 连着几帧对上才打（需调参）
-static int    kShotIntervalMs = 800;    // 两发之间隔多久（需调参）
+static int    kShotIntervalMs = 600;    // 两发之间隔多久（需调参）
 static int    kPushRetractMs = 200;     // 发射时推杆回缩时间，之后恢复伸出并保持
 static double kIntegralEnableOffsetPx = 40.0; // 目标距中心不超过此值时启用积分
-static double kFireRearmOffsetPx = 50.0; // 目标偏离中心超过此值时重新允许开火
+static double kFireRearmOffsetPx = 40.0; // 目标偏离中心超过此值时重新允许开火
 
 // 跨帧要记住的
 static int  g_aimedFrames = 0;
@@ -869,7 +869,7 @@ int main()
         }
 
         cv::imshow("Camera", image);
-        int key = cv::waitKey(1); // 也负责刷新窗口，不能删掉。
+        int key = cv::waitKey(3); // 也负责刷新窗口，不能删掉。
         if (key == 'q' || key == 'Q' || key == 27)
         {
             break;
